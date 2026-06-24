@@ -5,6 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>لوحة إدارة دلالية العقارات</title>
 <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <style>
   :root {
     --navy: #1B3A6B; --navy-light: #2A5298; --gold: #C9A84C; --gold-light: #E8C96A;
@@ -73,7 +75,7 @@
   .badge-available { background: var(--green); color: white; }
   .badge-rented { background: var(--orange); color: white; }
   .badge-sold { background: var(--red); color: white; }
-  .card-admin-actions { position: absolute; top: 10px; left: 10px; display: flex; gap: 4px; }
+  .card-admin-actions { position: absolute; top: 10px; left: 10px; display: flex; gap: 4px; z-index: 20; }
   .card-edit-btn, .card-del-btn { padding: 5px 10px; border-radius: 6px; border: none; font-family: 'Cairo',sans-serif; font-size: 11px; font-weight: 700; cursor: pointer; }
   .card-edit-btn { background: var(--gold); color: var(--navy); }
   .card-del-btn { background: var(--red); color: white; }
@@ -81,6 +83,8 @@
   .prop-title { font-size: 14px; font-weight: 800; color: var(--navy); margin-bottom: 4px; }
   .prop-location { font-size: 12px; color: var(--gray-600); margin-bottom: 8px; }
   .prop-price { font-size: 16px; font-weight: 900; color: var(--navy); }
+  .prop-specs-line { font-size: 12px; color: var(--gray-600); margin-bottom: 6px; }
+  .prop-owner-line { font-size: 11px; color: var(--gray-600); margin-top: 6px; }
   .prop-date { font-size: 11px; color: var(--gray-400); margin-top: 6px; }
 
   .empty-state { text-align: center; padding: 50px 24px; color: var(--gray-400); background: white; border-radius: var(--radius); grid-column: 1/-1; }
@@ -258,6 +262,12 @@
         <div class="form-group"><label>المنطقة / الحي *</label><input type="text" id="fArea" placeholder="مثال: الجادرية"></div>
         <div class="form-group form-full"><label>العنوان التفصيلي</label><input type="text" id="fAddress" placeholder="رقم الشارع، رقم الدار..."></div>
 
+        <div class="form-group form-full">
+          <label>📍 حدّد الموقع الدقيق على الخريطة (انقر على المكان الصحيح)</label>
+          <div id="locationMap" style="height:260px;border-radius:10px;overflow:hidden;border:1.5px solid var(--gray-200)"></div>
+          <p id="mapCoordsLabel" style="font-size:12px;color:var(--gray-400);margin-top:4px">لم يتم تحديد موقع بعد — انقر على الخريطة</p>
+        </div>
+
         <div class="form-section-title">📐 تفاصيل العقار</div>
         <div class="form-group"><label>المساحة (م²) *</label><input type="number" id="fArea2" placeholder="مثال: ٢٠٠"></div>
         <div class="form-group"><label>السعر (دينار) *</label><input type="number" id="fPrice" placeholder="مثال: ١٥٠٠٠٠٠٠٠"></div>
@@ -341,6 +351,11 @@ let currentTab = 'all';
 let editingId = null;
 let pendingDeleteId = null;
 let uploadedImages = [];
+let locationMap = null;
+let locationMarker = null;
+let selectedLat = null;
+let selectedLng = null;
+const IRAQ_CENTER = [33.3152, 44.3661]; // بغداد، نقطة بداية افتراضية للخريطة
 const MAX_IMAGES = 2;
 const MAX_IMG_DIMENSION = 800;
 const IMG_QUALITY = 0.6;
@@ -366,8 +381,8 @@ window.doLogin = async function() {
   try {
     await signInWithEmailAndPassword(auth, email, pass);
   } catch (err) {
-    console.error('Firebase login error:', err.code, err.message);
-    errEl.textContent = `❌ ${err.code || 'خطأ غير معروف'}`;
+    console.error(err);
+    errEl.textContent = '❌ بيانات الدخول غير صحيحة';
   }
 };
 
@@ -379,18 +394,15 @@ window.doLogout = async function() {
 // ─── تحميل بيانات المكتب المرتبط بهذا الحساب ───
 async function loadOfficeData() {
   try {
-    console.log('UID الحالي:', currentUser.uid);
     const officeQuery = query(collection(db, 'offices'), where('ownerUid', '==', currentUser.uid));
     const snap = await getDocs(officeQuery);
-    console.log('عدد النتائج:', snap.size, '— فارغة؟', snap.empty);
-    snap.forEach(d => console.log('مستند موجود:', d.id, JSON.stringify(d.data())));
     if (snap.empty) {
-      showToast(`⚠️ لا يوجد مكتب — UID المستخدم: ${currentUser.uid}`);
-      // لا نسجل الخروج تلقائياً الآن لتسهيل التشخيص
+      showToast('⚠️ لا يوجد مكتب مرتبط بهذا الحساب. تواصل مع مزوّد الخدمة');
+      await signOut(auth);
       return;
     }
     const officeDoc = snap.docs[0];
-    officeId = officeDoc.data().officeId;
+    officeId = (officeDoc.data().officeId || '').trim();
     officeData = officeDoc.data();
 
     document.getElementById('adminOfficeName').textContent = officeData.officeName || '—';
@@ -402,8 +414,8 @@ async function loadOfficeData() {
 
     await loadProperties();
   } catch (err) {
-    console.error('خطأ كامل:', err);
-    showToast(`❌ خطأ: ${err.code || err.message || 'غير معروف'}`);
+    console.error(err);
+    showToast('❌ حدث خطأ أثناء تحميل بيانات المكتب');
   }
 }
 
@@ -443,16 +455,27 @@ function renderAll() {
 function cardHTML(p) {
   const statusClass = p.status==='متوفر'?'badge-available':p.status==='مؤجر'?'badge-rented':'badge-sold';
   const imgHTML = p.imgs && p.imgs.length ? `<img src="${p.imgs[0]}">` : `<div class="prop-img-placeholder">${p.type==='قطع أراضي للبيع'?'🌍':p.type==='محلات للإيجار'?'🏪':'🏠'}</div>`;
+  const specs = [];
+  if (p.area2) specs.push(`📐 ${p.area2} م²`);
+  if (p.rooms) specs.push(`🛏️ ${p.rooms} غرف`);
+  if (p.baths) specs.push(`🚿 ${p.baths} حمام`);
+  if (p.parcel) specs.push(`📋 قطعة ${escapeHtml(p.parcel)}`);
+  if (p.block) specs.push(`🏘️ مقاطعة ${escapeHtml(p.block)}`);
   return `<div class="prop-card">
-    <div class="card-admin-actions">
-      <button class="card-edit-btn" onclick="editProperty('${p.id}')">✏️ تعديل</button>
-      <button class="card-del-btn" onclick="confirmDelete('${p.id}')">🗑️ حذف</button>
+    <div class="prop-img">
+      ${imgHTML}
+      <div class="card-admin-actions">
+        <button class="card-edit-btn" onclick="editProperty('${p.id}')">✏️ تعديل</button>
+        <button class="card-del-btn" onclick="confirmDelete('${p.id}')">🗑️ حذف</button>
+      </div>
+      <span class="prop-badge ${statusClass}">${p.status}</span>
     </div>
-    <div class="prop-img">${imgHTML}<span class="prop-badge ${statusClass}">${p.status}</span></div>
     <div class="prop-body">
       <div class="prop-title">${escapeHtml(p.title)}</div>
       <div class="prop-location">📍 ${escapeHtml(p.gov||'')} — ${escapeHtml(p.area||'')}</div>
+      ${specs.length ? `<div class="prop-specs-line">${specs.join(' · ')}</div>` : ''}
       <div class="prop-price">${formatPrice(p.price)}</div>
+      <div class="prop-owner-line">👤 ${escapeHtml(p.owner||'')} — 📞 ${escapeHtml(p.phone||'')}</div>
       <div class="prop-date">📅 ${formatDate(p.date)}</div>
     </div>
   </div>`;
@@ -480,6 +503,8 @@ function updateStats() {
 window.openAddModal = function() {
   editingId = null;
   uploadedImages = [];
+  selectedLat = null;
+  selectedLng = null;
   document.getElementById('addModalTitle').textContent = '➕ إضافة إعلان جديد';
   ['fTitle','fGov','fArea','fAddress','fArea2','fPrice','fRooms','fBaths','fParcel','fBlock','fDesc','fOwner','fPhone'].forEach(id => document.getElementById(id).value = '');
   document.getElementById('fType').value = 'بيوت للبيع';
@@ -490,6 +515,7 @@ window.openAddModal = function() {
   const uploadArea = document.querySelector('.img-upload-area');
   if (uploadArea) uploadArea.style.display = '';
   document.getElementById('addModal').classList.add('open');
+  setTimeout(() => initLocationMap(null, null), 50);
 };
 
 window.editProperty = function(id) {
@@ -497,6 +523,8 @@ window.editProperty = function(id) {
   if (!p) return;
   editingId = id;
   uploadedImages = p.imgs ? [...p.imgs] : [];
+  selectedLat = p.lat || null;
+  selectedLng = p.lng || null;
   document.getElementById('addModalTitle').textContent = '✏️ تعديل الإعلان';
   document.getElementById('fType').value = p.type;
   document.getElementById('fTitle').value = p.title || '';
@@ -516,9 +544,13 @@ window.editProperty = function(id) {
   document.getElementById('fDate').value = p.date || new Date().toISOString().split('T')[0];
   renderImgPreview();
   document.getElementById('addModal').classList.add('open');
+  setTimeout(() => initLocationMap(selectedLat, selectedLng), 50);
 };
 
-window.closeAddModal = function() { document.getElementById('addModal').classList.remove('open'); };
+window.closeAddModal = function() {
+  document.getElementById('addModal').classList.remove('open');
+  if (locationMap) { locationMap.remove(); locationMap = null; locationMarker = null; }
+};
 
 window.saveProperty = async function() {
   const title = document.getElementById('fTitle').value.trim();
@@ -537,6 +569,8 @@ window.saveProperty = async function() {
     type: document.getElementById('fType').value,
     title, gov, area,
     address: document.getElementById('fAddress').value,
+    lat: selectedLat || null,
+    lng: selectedLng || null,
     area2: parseFloat(document.getElementById('fArea2').value) || 0,
     price,
     rooms: parseInt(document.getElementById('fRooms').value) || 0,
@@ -584,6 +618,61 @@ window.confirmDelete = function(id) {
   };
 };
 window.closeConfirm = function() { document.getElementById('confirmOverlay').classList.remove('open'); pendingDeleteId = null; };
+
+// ─── الخريطة التفاعلية لتحديد موقع العقار ───
+function initLocationMap(lat, lng) {
+  // إذا كانت الخريطة موجودة مسبقاً، نزيلها لإعادة إنشائها بشكل نظيف
+  if (locationMap) {
+    locationMap.remove();
+    locationMap = null;
+    locationMarker = null;
+  }
+  const startPoint = (lat && lng) ? [lat, lng] : IRAQ_CENTER;
+  locationMap = L.map('locationMap').setView(startPoint, lat && lng ? 15 : 6);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '© OpenStreetMap contributors',
+    maxZoom: 19
+  }).addTo(locationMap);
+
+  if (lat && lng) {
+    placeMarker(lat, lng);
+  }
+
+  locationMap.on('click', function(e) {
+    placeMarker(e.latlng.lat, e.latlng.lng);
+  });
+
+  // إصلاح مشكلة شائعة: الخريطة تظهر مشوّهة إذا أُنشئت داخل نافذة كانت مخفية
+  setTimeout(() => { if (locationMap) locationMap.invalidateSize(); }, 200);
+}
+
+function placeMarker(lat, lng) {
+  selectedLat = lat;
+  selectedLng = lng;
+  if (locationMarker) {
+    locationMarker.setLatLng([lat, lng]);
+  } else {
+    locationMarker = L.marker([lat, lng], { draggable: true }).addTo(locationMap);
+    locationMarker.on('dragend', function(e) {
+      const pos = e.target.getLatLng();
+      selectedLat = pos.lat;
+      selectedLng = pos.lng;
+      updateMapCoordsLabel();
+    });
+  }
+  updateMapCoordsLabel();
+}
+
+function updateMapCoordsLabel() {
+  const label = document.getElementById('mapCoordsLabel');
+  if (selectedLat && selectedLng) {
+    label.textContent = `✅ تم تحديد الموقع: ${selectedLat.toFixed(5)}, ${selectedLng.toFixed(5)}`;
+    label.style.color = 'var(--green)';
+  } else {
+    label.textContent = 'لم يتم تحديد موقع بعد — انقر على الخريطة';
+    label.style.color = 'var(--gray-400)';
+  }
+}
 
 // ─── الصور (ضغط + حد أقصى صورتين) ───
 window.handleImgs = function(input) {

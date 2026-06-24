@@ -5,6 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>دلالية العقارات</title>
 <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <style>
   :root {
     --navy: #1B3A6B;
@@ -297,7 +299,8 @@ let filteredProps = [];
 // ─── قراءة معرّف المكتب من الرابط (?office=...) ───
 function getOfficeIdFromUrl() {
   const params = new URLSearchParams(window.location.search);
-  return params.get('office');
+  const val = params.get('office');
+  return val ? val.trim() : val;
 }
 
 // ─── التهيئة ───
@@ -353,7 +356,7 @@ function renderOfficeInfo() {
   document.getElementById('brokerOffice').textContent = '🏢 ' + (officeData.officeName || '—');
   document.getElementById('footerOfficeName').textContent = officeData.officeName || 'دلالية العقارات';
 
-  const phone = officeData.phone || '';
+  const phone = (officeData.phone || '').replace(/[^0-9]/g, '');
   const contactHTML = phone ? `
     <a class="broker-contact-btn broker-call" href="tel:${phone}">📞 ${phone}</a>
     <a class="broker-contact-btn broker-wa" href="https://wa.me/964${phone.replace(/^0/,'')}" target="_blank">💬 واتساب</a>
@@ -386,7 +389,7 @@ function cardHTML(p) {
   if (p.rooms) specs.push(`<div class="spec-item">🛏️ <strong>${p.rooms}</strong> غرف</div>`);
   if (p.baths) specs.push(`<div class="spec-item">🚿 <strong>${p.baths}</strong> حمام</div>`);
   if (p.area2) specs.push(`<div class="spec-item">📐 <strong>${p.area2}</strong> م²</div>`);
-  const phone = officeData.phone || '';
+  const phone = (officeData.phone || '').replace(/[^0-9]/g, '');
 
   return `<div class="prop-card">
     <div class="prop-img" onclick="openDetail('${p.id}')">
@@ -425,15 +428,16 @@ window.openDetail = function(id) {
     p.area2 ? {icon:'📐',label:'المساحة',val:`${p.area2} م²`} : null,
     p.rooms ? {icon:'🛏️',label:'الغرف',val:`${p.rooms} غرفة`} : null,
     p.baths ? {icon:'🚿',label:'الحمامات',val:`${p.baths} حمام`} : null,
-    p.parcel ? {icon:'📋',label:'رقم القطعة',val:p.parcel} : null,
-    p.block ? {icon:'🏘️',label:'رقم المقاطعة',val:p.block} : null,
+    p.parcel ? {icon:'📋',label:'رقم القطعة',val:escapeHtml(p.parcel)} : null,
+    p.block ? {icon:'🏘️',label:'رقم المقاطعة',val:escapeHtml(p.block)} : null,
   ].filter(Boolean);
 
   const galleryHTML = p.imgs && p.imgs.length
     ? p.imgs.map(img => `<div><img src="${img}"></div>`).join('')
     : `<div class="detail-gallery-placeholder">${p.type==='قطع أراضي للبيع'?'🌍':p.type==='محلات للإيجار'?'🏪':'🏠'}</div>`;
 
-  const phone = officeData.phone || '';
+  const phone = (officeData.phone || '').replace(/[^0-9]/g, '');
+  const hasLocation = p.lat && p.lng;
 
   document.getElementById('detailModalTitle').textContent = p.title;
   document.getElementById('detailContent').innerHTML = `
@@ -446,16 +450,33 @@ window.openDetail = function(id) {
       </div>
       <div class="detail-specs">${specs.map(s=>`<div class="detail-spec"><div class="spec-icon">${s.icon}</div><div class="spec-label">${s.label}</div><div class="spec-val">${s.val}</div></div>`).join('')}</div>
       <div class="detail-section"><h4>الموقع</h4><p>📍 ${escapeHtml(p.gov||'')} — ${escapeHtml(p.area||'')}<br>${escapeHtml(p.address||'')}</p></div>
+      ${hasLocation ? `
+      <div class="detail-section">
+        <div id="detailMap" style="height:220px;border-radius:10px;overflow:hidden;margin-bottom:8px"></div>
+        <a href="https://www.google.com/maps/dir/?api=1&destination=${p.lat},${p.lng}" target="_blank" class="btn-details" style="display:flex;width:100%">🧭 احصل على الاتجاهات</a>
+      </div>` : ''}
       ${p.desc ? `<div class="detail-section"><h4>وصف العقار</h4><p>${escapeHtml(p.desc)}</p></div>` : ''}
       <div class="detail-contact">
-        <div><div class="owner-name">👤 ${escapeHtml(p.owner||'')}</div><div class="owner-phone">${p.phone||''}</div></div>
+        <div><div class="owner-name">🏢 ${escapeHtml(officeData.officeName||'')}</div><div class="owner-phone">${escapeHtml(officeData.ownerName||'')}</div></div>
         <div class="contact-btns">
-          <a class="btn-call" href="tel:${p.phone}" style="padding:9px 16px">📞 اتصال</a>
-          <a class="btn-whatsapp" href="https://wa.me/964${(p.phone||'').replace(/^0/,'')}" target="_blank" style="padding:9px 16px">💬 واتساب</a>
+          <a class="btn-call" href="tel:${phone}" style="padding:9px 16px">📞 اتصال</a>
+          <a class="btn-whatsapp" href="https://wa.me/964${phone.replace(/^0/,'')}" target="_blank" style="padding:9px 16px">💬 واتساب</a>
         </div>
       </div>
     </div>`;
   document.getElementById('detailModal').classList.add('open');
+
+  if (hasLocation) {
+    setTimeout(() => {
+      const map = L.map('detailMap', { zoomControl: true, dragging: true }).setView([p.lat, p.lng], 15);
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '© OpenStreetMap contributors',
+        maxZoom: 19
+      }).addTo(map);
+      L.marker([p.lat, p.lng]).addTo(map);
+      setTimeout(() => map.invalidateSize(), 100);
+    }, 50);
+  }
 };
 window.closeDetail = function() { document.getElementById('detailModal').classList.remove('open'); };
 
